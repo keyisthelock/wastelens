@@ -1,0 +1,14 @@
+{
+  "city": "Lucknow",
+  "region": "Uttar Pradesh, India",
+  "approximate_bbox": {
+    "south": 26.744,
+    "west": 80.831,
+    "north": 26.935,
+    "east": 81.062
+  },
+  "boundary_source_url": "https://raw.githubusercontent.com/yashveeeeeeer/india-geodata/main/data/urban/municipal-boundaries/lucknow/Lucknow_city_boundary.geojson",
+  "boundary_dataset_license": "CC-BY-4.0 (DataMeet municipal boundary data, as catalogued by India Geodata)",
+  "verified_on": "2026-10-09",
+  "scope_note": "The rectangle is a coarse guard derived from an open-data city boundary; it is not an official LNN jurisdiction lookup and does not validate a ward. Residents must confirm municipal jurisdiction before using a contact."
+}

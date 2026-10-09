@@ -1,0 +1,28 @@
+# Credentials and per-developer settings
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+**/.aws/
+*.pem
+*.key
+credentials.json
+
+# Private local pilot data
+backend/data/*.db
+backend/data/*.db-*
+backend/uploads/**
+!backend/uploads/.gitkeep
+
+# Build/runtime output
+backend/.venv/
+**/__pycache__/
+**/*.py[cod]
+frontend/node_modules/
+frontend/dist/
+.pytest_cache/
+coverage/
+WasteLens-project.zip
+.DS_Store

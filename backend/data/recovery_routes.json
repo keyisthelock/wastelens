@@ -1,0 +1,59 @@
+{
+  "locality": "Lucknow, Uttar Pradesh, India",
+  "verified_on": "2026-10-09",
+  "routes": [
+    {
+      "id": "organic_compost_biomethanation",
+      "category": "wet_organic",
+      "title": "Separate organics for composting or biomethanation",
+      "advice": "Keep food and garden waste separate from dry recyclables. Uttar Pradesh policy identifies composting and biomethanation as preferred organic-waste pathways. No active Lucknow intake site is verified in this directory; confirm collection with Lucknow Nagar Nigam before handing waste over.",
+      "availability": "local_intake_unverified",
+      "source_url": "https://invest.up.gov.in/wp-content/uploads/2023/02/Uttar-Pradesh-State-Solid-Waste-Management-Policy.pdf",
+      "verified_on": "2026-10-09"
+    },
+    {
+      "id": "dry_material_recovery",
+      "category": "dry_recyclable",
+      "title": "Keep dry recyclables clean and ask for an authorized local handoff",
+      "advice": "Separate clean paper, metal, glass and accepted plastics. State policy describes material-recovery centres and authorized waste pickers or recyclers; this directory does not verify a named Lucknow recycler or its current intake. Confirm the ward-level handoff with Lucknow Nagar Nigam.",
+      "availability": "named_local_recycler_unverified",
+      "source_url": "https://invest.up.gov.in/wp-content/uploads/2023/02/Uttar-Pradesh-State-Solid-Waste-Management-Policy.pdf",
+      "verified_on": "2026-10-09"
+    },
+    {
+      "id": "ewaste_authorized_channel",
+      "category": "e_waste",
+      "title": "Use a producer take-back or CPCB-registered e-waste channel",
+      "advice": "Do not place electronics in mixed household waste or dismantle them. Use the producer's take-back instructions or check CPCB's e-waste portal for registered entities. The portal is an authorization and registration resource, not a verified Lucknow household collection booking; local collection availability is unverified.",
+      "availability": "local_collection_unverified",
+      "url": "https://eprewaste.cpcb.gov.in/",
+      "source_url": "https://www.niveshmitra.up.gov.in/services/",
+      "verified_on": "2026-10-09"
+    },
+    {
+      "id": "domestic_hazardous_separate",
+      "category": "hazardous",
+      "title": "Keep domestic hazardous waste separate and request municipal directions",
+      "advice": "Keep batteries, blades, chemicals and other household hazardous items separate, sealed where safe, and away from children. Uttar Pradesh policy requires separate handling; no household hazardous collection point is verified here. Ask Lucknow Nagar Nigam for current safe handoff instructions.",
+      "availability": "local_collection_unverified",
+      "source_url": "https://invest.up.gov.in/wp-content/uploads/2023/02/Uttar-Pradesh-State-Solid-Waste-Management-Policy.pdf",
+      "verified_on": "2026-10-09"
+    },
+    {
+      "id": "mixed_waste_municipal_routing",
+      "category": "mixed",
+      "title": "Request municipal segregation and collection guidance",
+      "advice": "Do not burn the pile or move hazardous contents by hand. The material is mixed or uncertain, so ask Lucknow Nagar Nigam to confirm the appropriate collection route. No site-specific pickup has been booked by WasteLens.",
+      "availability": "municipal_confirmation_required",
+      "source_url": "https://lmc.up.nic.in/helpline.aspx",
+      "verified_on": "2026-10-09"
+    }
+  ],
+  "energy_pathway_note": {
+    "title": "RDF and waste-to-energy are not configured as local destinations",
+    "advice": "Uttar Pradesh policy describes RDF and waste-to-energy pathways for suitable residual waste. WasteLens has not verified a currently operating Lucknow intake facility or its acceptance rules, so it will not direct a report there.",
+    "availability": "local_operator_unverified",
+    "source_url": "https://invest.up.gov.in/wp-content/uploads/2023/02/Uttar-Pradesh-State-Solid-Waste-Management-Policy.pdf",
+    "verified_on": "2026-10-09"
+  }
+}

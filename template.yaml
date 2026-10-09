@@ -1,0 +1,382 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: WasteLens single-locality civic waste pilot (API, private photo storage, reports)
+
+Parameters:
+  AllowedOrigin:
+    Type: String
+    Description: Required exact HTTPS origin of the deployed frontend, with no trailing slash.
+  BedrockModelId:
+    Type: String
+    Default: anthropic.claude-sonnet-4-5-20250929-v1:0
+    Description: Multimodal Claude model enabled for this AWS account and region.
+
+Resources:
+  WasteLensHttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: prod
+      CorsConfiguration:
+        AllowOrigins:
+          - !Ref AllowedOrigin
+        AllowMethods:
+          - GET
+          - POST
+          - PATCH
+          - DELETE
+          - OPTIONS
+        AllowHeaders:
+          - Content-Type
+          - X-Client-Token
+          - X-Report-Token
+          - X-Admin-Token
+        MaxAge: 600
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 40
+        ThrottlingRateLimit: 20
+
+  WasteLensFrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  WasteLensFrontendOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-frontend-oac'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  WasteLensSecurityHeaders:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub '${AWS::StackName}-security-headers'
+        Comment: Browser transport and content safety headers for WasteLens.
+        SecurityHeadersConfig:
+          ContentSecurityPolicy:
+            ContentSecurityPolicy: >-
+              default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' blob: data: https:; connect-src 'self' https:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; upgrade-insecure-requests
+            Override: true
+          ContentTypeOptions:
+            Override: true
+          FrameOptions:
+            FrameOption: DENY
+            Override: true
+          ReferrerPolicy:
+            ReferrerPolicy: strict-origin-when-cross-origin
+            Override: true
+          StrictTransportSecurity:
+            AccessControlMaxAgeSec: 31536000
+            IncludeSubdomains: true
+            Preload: false
+            Override: true
+
+  WasteLensDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: WasteLens frontend and same-origin API
+        DefaultRootObject: index.html
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: WasteLensFrontend
+            DomainName: !GetAtt WasteLensFrontendBucket.RegionalDomainName
+            OriginAccessControlId: !Ref WasteLensFrontendOriginAccessControl
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+          - Id: WasteLensApi
+            DomainName: !Sub '${WasteLensHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}'
+            OriginPath: /prod
+            CustomOriginConfig:
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols:
+                - TLSv1.2
+        DefaultCacheBehavior:
+          TargetOriginId: WasteLensFrontend
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          ResponseHeadersPolicyId: !Ref WasteLensSecurityHeaders
+        CacheBehaviors:
+          - PathPattern: /api*
+            TargetOriginId: WasteLensApi
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+              - PUT
+              - PATCH
+              - POST
+              - DELETE
+            CachedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+            Compress: true
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+            ResponseHeadersPolicyId: !Ref WasteLensSecurityHeaders
+          - PathPattern: /health
+            TargetOriginId: WasteLensApi
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+            CachedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+            Compress: true
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+          MinimumProtocolVersion: TLSv1.2_2021
+
+  WasteLensFrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WasteLensFrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontReadOnly
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${WasteLensFrontendBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${WasteLensDistribution}'
+
+  WasteLensPhotoBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins:
+              - !Ref AllowedOrigin
+            AllowedMethods:
+              - PUT
+            AllowedHeaders:
+              - Content-Type
+            MaxAge: 300
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireUnconfirmedUploads
+            Status: Enabled
+            Prefix: pending/
+            ExpirationInDays: 2
+
+  WasteLensPhotoBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WasteLensPhotoBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt WasteLensPhotoBucket.Arn
+              - !Sub '${WasteLensPhotoBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  WasteLensReportsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+        - AttributeName: gsi1pk
+          AttributeType: S
+        - AttributeName: gsi1sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: ByLocalityAndCreatedAt
+          KeySchema:
+            - AttributeName: gsi1pk
+              KeyType: HASH
+            - AttributeName: gsi1sk
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  WasteLensOperatorToken:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: Private operator token used to authenticate report status updates.
+      GenerateSecretString:
+        PasswordLength: 48
+        ExcludePunctuation: true
+
+  WasteLensApiFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: WasteLensApiLogGroup
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-WasteLensApi'
+      CodeUri: backend/
+      Handler: app.lambda_handler.handler
+      Runtime: python3.13
+      Architectures:
+        - arm64
+      MemorySize: 1024
+      Timeout: 45
+      Environment:
+        Variables:
+          WASTELENS_DYNAMODB_TABLE: !Ref WasteLensReportsTable
+          WASTELENS_UPLOAD_BUCKET: !Ref WasteLensPhotoBucket
+          WASTELENS_ADMIN_TOKEN_SECRET_ARN: !Ref WasteLensOperatorToken
+          WASTELENS_BEDROCK_MODEL_ID: !Ref BedrockModelId
+          WASTELENS_ALLOWED_ORIGINS: !Ref AllowedOrigin
+          WASTELENS_CLOUD_SECURITY_PROFILE: sam
+      Policies:
+        - Statement:
+            - Sid: ManagePilotReportsAndIndexes
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
+                - dynamodb:Query
+                - dynamodb:BatchWriteItem
+                - dynamodb:TransactWriteItems
+              Resource:
+                - !GetAtt WasteLensReportsTable.Arn
+                - !Sub '${WasteLensReportsTable.Arn}/index/*'
+            - Sid: ManagePrivatePhotos
+              Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+                - s3:DeleteObject
+              Resource: !Sub '${WasteLensPhotoBucket.Arn}/*'
+            - Sid: ReadOperatorSecret
+              Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref WasteLensOperatorToken
+            - Sid: InvokeConfiguredClaudeModel
+              Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: !Sub 'arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}'
+            - Sid: InspectUploadedImage
+              Effect: Allow
+              Action:
+                - rekognition:DetectLabels
+                - rekognition:DetectModerationLabels
+              Resource: '*'
+      Events:
+        ApiProxy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WasteLensHttpApi
+            Path: /api/{proxy+}
+            Method: ANY
+        ApiRoot:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WasteLensHttpApi
+            Path: /api
+            Method: ANY
+        Health:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WasteLensHttpApi
+            Path: /health
+            Method: GET
+
+  WasteLensApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-WasteLensApi'
+      RetentionInDays: 14
+
+  WasteLensApiErrors:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Alert when the WasteLens Lambda API reports sustained errors.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref WasteLensApiFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 3
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  WasteLensApiUrl:
+    Description: Set VITE_API_URL on the frontend to this URL plus /api.
+    Value: !Sub 'https://${WasteLensHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/prod'
+  WasteLensPhotoBucketName:
+    Value: !Ref WasteLensPhotoBucket
+  WasteLensReportsTableName:
+    Value: !Ref WasteLensReportsTable
+  WasteLensOperatorSecretArn:
+    Description: Retrieve the operator token from Secrets Manager after deployment.
+    Value: !Ref WasteLensOperatorToken
+  WasteLensSiteUrl:
+    Description: CloudFront site URL. Sync frontend/dist to the frontend bucket first.
+    Value: !Sub 'https://${WasteLensDistribution.DomainName}'
+  WasteLensFrontendBucketName:
+    Value: !Ref WasteLensFrontendBucket

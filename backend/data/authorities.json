@@ -1,0 +1,17 @@
+[
+  {
+    "id": "lucknow-nagar-nigam",
+    "name": "Lucknow Nagar Nigam",
+    "city": "Lucknow",
+    "region": "Uttar Pradesh, India",
+    "scope_note": "City-level pilot contact. The app does not validate Lucknow Nagar Nigam boundaries at coordinate level; residents should confirm the site is within LNN jurisdiction.",
+    "verified": true,
+    "verified_on": "2026-10-09",
+    "channels": [
+      { "type": "phone", "label": "Control room toll-free", "value": "1533" },
+      { "type": "phone", "label": "WhatsApp / calling", "value": "9219902911" },
+      { "type": "web", "label": "Official complaint portal", "url": "https://lucknow.everythingcivic.com/" }
+    ],
+    "source_url": "https://lmc.up.nic.in/helpline.aspx"
+  }
+]

@@ -1,0 +1,14 @@
+{
+  "food_waste_composting_vs_landfill_us_proxy_v16": {
+    "material_category": "wet_organic",
+    "landfill_scenario": "EPA WARM v16 food waste landfill without landfill-gas recovery",
+    "landfill_mtco2e_per_short_ton": 1.45,
+    "compost_mtco2e_per_short_ton": -0.15,
+    "short_ton_kg": 907.18474,
+    "factor_kgco2e_per_kg": 1.7637,
+    "formula": "(1.45 - (-0.15)) MTCO2e per short ton × 1000 kg/MT ÷ 907.18474 kg/short ton = 1.7637 kgCO2e/kg",
+    "source_url": "https://www.epa.gov/system/files/documents/2023-12/warm_organic_materials_v16_dec.pdf",
+    "source_scope": "United States lifecycle model; not calibrated to Lucknow waste composition, landfill methane capture, electricity mix, transport or compost operations.",
+    "verified_on": "2026-10-09"
+  }
+}
