@@ -10,6 +10,7 @@
     "channels": [
       { "type": "phone", "label": "Control room toll-free", "value": "1533" },
       { "type": "phone", "label": "WhatsApp / calling", "value": "9219902911" },
+      { "type": "email", "label": "Published public contact email (not a ticket inbox)", "value": "nnlko@nic.in" },
       { "type": "web", "label": "Official complaint portal", "url": "https://lucknow.everythingcivic.com/" }
     ],
     "source_url": "https://lmc.up.nic.in/helpline.aspx"

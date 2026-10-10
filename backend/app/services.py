@@ -1,12 +1,14 @@
 """Source-backed waste classification helpers and explicit estimate calculations."""
 
 import json
+import logging
 import os
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.storage import ROOT
+from app.ai_budget import AiBudgetUnavailable, reserve_ai_call
 
 MATERIAL_CATEGORIES = {
     "wet_organic": "Wet / organic",
@@ -20,7 +22,13 @@ MASS_CLASSES = {
     "medium": (5.0, 25.0),
     "large": (25.0, 100.0),
 }
+logger = logging.getLogger(__name__)
+
 MODEL_ID_DEFAULT = "anthropic.claude-sonnet-4-5-20250929-v1:0"
+
+
+class BedrockDisabled(RuntimeError):
+    pass
 
 
 class VisionClassification(BaseModel):
@@ -29,8 +37,11 @@ class VisionClassification(BaseModel):
     model_config = ConfigDict(extra="forbid")
     material_category: str = Field(pattern="^(wet_organic|dry_recyclable|e_waste|hazardous|mixed)$")
     segregation_advice: str = Field(min_length=4, max_length=500)
-    mass_class: str = Field(pattern="^(small|medium|large)$")
+    mass_class: str = Field(pattern="^(small|medium|large|unknown)$")
     visual_note: str = Field(min_length=4, max_length=300)
+    visible_objects: list[str] = Field(default_factory=list, max_length=12)
+    material_clues: list[str] = Field(default_factory=list, max_length=12)
+    uncertainty: str = Field(default="Visual identification and quantity are uncertain; resident review required.", max_length=300)
 
 
 def authority_directory():
@@ -116,15 +127,20 @@ def _classification_schema():
         "properties": {
             "material_category": {"type": "string", "enum": list(MATERIAL_CATEGORIES)},
             "segregation_advice": {"type": "string"},
-            "mass_class": {"type": "string", "enum": list(MASS_CLASSES)},
+            "mass_class": {"type": "string", "enum": [*MASS_CLASSES, "unknown"]},
             "visual_note": {"type": "string"},
+            "visible_objects": {"type": "array", "items": {"type": "string"}},
+            "material_clues": {"type": "array", "items": {"type": "string"}},
+            "uncertainty": {"type": "string"},
         },
-        "required": ["material_category", "segregation_advice", "mass_class", "visual_note"],
+        "required": ["material_category", "segregation_advice", "mass_class", "visual_note", "visible_objects", "material_clues", "uncertainty"],
         "additionalProperties": False,
     }
 
 
 def _bedrock_vision_call(image_path: Path | bytes):
+    if os.getenv("WASTELENS_BEDROCK_ENABLED", "true").lower() == "false":
+        raise BedrockDisabled("Bedrock is disabled for this demo while account inference allowance is unavailable")
     import boto3
     from botocore.config import Config
 
@@ -139,6 +155,14 @@ def _bedrock_vision_call(image_path: Path | bytes):
     client = boto3.client("bedrock-runtime", region_name=region,
                           config=Config(connect_timeout=5, read_timeout=35,
                                         retries={"max_attempts": 1}))
+    output_mode = os.getenv("WASTELENS_BEDROCK_OUTPUT_MODE", "json_schema")
+    if output_mode not in {"json_schema", "prompt_json"}:
+        raise ValueError("Choose json_schema or prompt_json for Bedrock output mode")
+    output_options = ({"outputConfig": {"textFormat": {"type": "json_schema", "structure": {
+        "jsonSchema": {"name": "waste_classification", "description": "Waste photo suggestion",
+                       "schema": json.dumps(_classification_schema())}}}}}
+        if output_mode == "json_schema" else {})
+    reserve_ai_call()
     response = client.converse(
         modelId=os.getenv("WASTELENS_BEDROCK_MODEL_ID", MODEL_ID_DEFAULT),
         messages=[{"role": "user", "content": [
@@ -147,20 +171,43 @@ def _bedrock_vision_call(image_path: Path | bytes):
                      "without naming a local collector, facility, authority, pickup, location, or contact. Estimate "
                      "only a broad visual mass class (small 1-5 kg, medium 5-25 kg, large 25-100 kg); this is highly "
                      "uncertain and must be reviewed by the resident. Do not infer severity, ownership, or whether "
-                     "a site is public/private. Set visual_note to a brief observable description."},
+                     "a site is public/private. Use mass_class unknown when quantity cannot be inferred. Never claim "
+                     "exact mass, official severity, jurisdiction, recycler acceptance or cleanup costs. List visible_objects "
+                     "and material_clues separately; explicitly explain uncertainty. Set visual_note to a brief observable description. "
+                     "Return only JSON matching this schema: " + json.dumps(_classification_schema())},
             {"image": {"format": image_format, "source": {"bytes": body}}},
         ]}],
-        inferenceConfig={"temperature": 0, "maxTokens": 500},
-        outputConfig={"textFormat": {"type": "json_schema", "structure": {
-            "jsonSchema": {"name": "waste_classification", "description": "Waste photo suggestion",
-                           "schema": json.dumps(_classification_schema())}}}},
+        inferenceConfig={"temperature": 0, "maxTokens": 800},
+        **output_options,
     )
-    text = next((block.get("text") for block in response.get("output", {}).get("message", {}).get("content", [])
-                 if block.get("text")), None)
+    if response.get("stopReason") in {"max_tokens", "guardrail_intervened", "content_filtered"}:
+        raise ValueError("Bedrock did not return a complete classification")
+    text = "".join(block["text"] for block in response.get("output", {}).get("message", {}).get("content", [])
+                   if isinstance(block, dict) and isinstance(block.get("text"), str))
     if not text:
         raise ValueError("Bedrock returned no structured text")
     parsed = VisionClassification.model_validate_json(text)
     return parsed.model_dump()
+
+
+def _analysis_failure(service, exc):
+    code = getattr(exc, "response", {}).get("Error", {}).get("Code", type(exc).__name__)
+    logger.warning("%s unavailable (%s)", service, code)
+    if isinstance(exc, (AiBudgetUnavailable, BedrockDisabled)):
+        action = str(exc) + "."
+    elif code in {"NoCredentialsError", "PartialCredentialsError"}:
+        action = "AWS credentials are unavailable; the operator must configure the AWS credential chain."
+    elif code in {"AccessDenied", "AccessDeniedException", "UnauthorizedException"}:
+        action = "AWS access was denied; the operator must check IAM permissions and model access."
+    elif code in {"ValidationException", "ResourceNotFoundException"}:
+        action = "The AWS request was rejected; check the model or inference profile ID, region and image limits."
+    elif code in {"ThrottlingException", "TooManyRequestsException"}:
+        action = "AWS is rate limited; retry later."
+    elif not (os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")):
+        action = "AWS region is not configured."
+    else:
+        action = "The service or its response is unavailable; retry later or ask the operator to check configuration."
+    return f"{service} unavailable. {action} Select or correct the category manually; your report remains saved."
 
 
 def classify_waste_image(image_path: Path | bytes):
@@ -168,23 +215,59 @@ def classify_waste_image(image_path: Path | bytes):
     try:
         suggestion = _bedrock_vision_call(image_path)
     except Exception as exc:
+        if os.getenv("WASTELENS_REKOGNITION_GUIDE_FALLBACK", "false").lower() == "true":
+            return _rekognition_guide(image_path)
         return {"analysis_available": False, "ai_used": False,
-                "note": f"Bedrock classification is unavailable ({type(exc).__name__}). Review and select the material category manually.",
+                "source": "unavailable", "note": _analysis_failure("Amazon Bedrock", exc),
                 "classification": None, "recovery_route": None, "impact": None}
 
     category = suggestion["material_category"]
-    mass_min, mass_max = MASS_CLASSES[suggestion["mass_class"]]
+    mass_min, mass_max = MASS_CLASSES.get(suggestion["mass_class"], (None, None))
     route = recovery_route_for(category)
     return {
         "analysis_available": True,
-        "ai_used": True,
+        "ai_used": True, "source": "aws_bedrock",
         "note": "AI photo suggestions; material, segregation advice and visual mass class require resident review.",
         "classification": {**suggestion, "material_label": MATERIAL_CATEGORIES[category],
-                            "review_required": True, "estimate_label": "rough visual estimate"},
+                            "source": "aws_bedrock", "review_required": True, "estimate_label": "rough visual estimate"},
         "recovery_route": route,
-        "mass_range_kg": {"min": mass_min, "max": mass_max, "estimate": True},
+        "mass_range_kg": ({"min": mass_min, "max": mass_max, "estimate": True} if mass_min is not None else None),
         "impact": impact_for(category, mass_min, mass_max),
     }
+
+
+def _rekognition_guide(image_path):
+    """Join actual image-label evidence to local guidance without invented weights."""
+    result = analyze_image(image_path)
+    if not result["analysis_available"]:
+        return {**result, "ai_used": False, "classification": None, "recovery_route": None, "impact": None}
+    categories = result["categories"]
+    if not categories:
+        return {**result, "analysis_available": False, "ai_used": True, "classification": None,
+                "recovery_route": None, "impact": None,
+                "note": "AWS Rekognition returned labels, but no supported waste material could be identified. Choose a category manually."}
+    families = set()
+    if any(category in categories for category in ("plastic", "paper", "glass", "metal")):
+        families.add("dry_recyclable")
+    if "food waste" in categories:
+        families.add("wet_organic")
+    if "electronic waste" in categories:
+        families.add("e_waste")
+    category = next(iter(families)) if len(families) == 1 else "mixed"
+    route = recovery_route_for(category)
+    evidence = list(dict.fromkeys(label["name"] for suggestion in result["material_suggestions"]
+                                 for label in suggestion["evidence"]))[:12]
+    classification = {
+        "material_category": category, "material_label": MATERIAL_CATEGORIES[category],
+        "segregation_advice": route["advice"] if route else "Select a material and verify safe handling locally.",
+        "mass_class": "unknown", "visual_note": "AWS image labels suggest: " + ", ".join(categories) + ".",
+        "visible_objects": [label["name"] for label in result["raw_labels"][:12]],
+        "material_clues": evidence, "uncertainty": "Labels do not establish disposal status, safe recyclability or quantity. Resident review is required.",
+        "source": "aws_rekognition", "review_required": True, "estimate_label": "quantity not assessed",
+    }
+    return {**result, "ai_used": True, "classification": classification, "recovery_route": route,
+            "mass_range_kg": None, "impact": impact_for(category, None, None),
+            "note": "AWS Rekognition label suggestion with local handling guidance; Bedrock was not used. No weight was inferred."}
 
 
 def analyze_image(image_path: Path | bytes):
@@ -192,35 +275,62 @@ def analyze_image(image_path: Path | bytes):
     region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
     if not region:
         return {"analysis_available": False, "categories": [], "severity": "unassessed",
-                "moderation_state": "check_unavailable", "moderation_labels": [],
+                "source": "unavailable", "moderation_state": "check_unavailable", "moderation_labels": [],
                 "note": "AWS region is not configured. Add or review categories manually."}
     try:
         import boto3
-        client = boto3.client("rekognition", region_name=region)
+        from botocore.config import Config
+        client = boto3.client("rekognition", region_name=region,
+                              config=Config(connect_timeout=5, read_timeout=20, retries={"max_attempts": 1}))
         image_bytes = image_path if isinstance(image_path, bytes) else image_path.read_bytes()
+        reserve_ai_call()
         response = client.detect_labels(Image={"Bytes": image_bytes}, MaxLabels=20,
                                         MinConfidence=55)
-        moderation_result = client.detect_moderation_labels(
-            Image={"Bytes": image_bytes}, MinConfidence=60)
-        mappings = {"plastic": {"plastic", "bottle", "plastic bag", "plastic wrap"},
+        moderation_available = True
+        try:
+            moderation_result = client.detect_moderation_labels(Image={"Bytes": image_bytes}, MinConfidence=60)
+        except Exception as exc:
+            moderation_available = False
+            moderation_result = {}
+            _analysis_failure("Amazon Rekognition moderation", exc)
+        mappings = {"plastic": {"plastic", "plastic bottle", "plastic bag", "plastic wrap"},
                     "paper": {"paper", "cardboard", "carton"},
-                    "metal": {"can", "metal", "aluminum", "tin"},
-                    "glass": {"glass", "jar"},
+                    "metal": {"metal", "aluminum", "tin", "aluminum can", "tin can"},
+                    "glass": {"glass", "glass bottle", "glass jar"},
                     "food waste": {"food", "fruit", "vegetable", "food waste"},
                     "electronic waste": {"electronics", "electronic device", "computer", "mobile phone", "circuit board"},
                     "waste": {"trash", "waste", "garbage", "litter", "dumpster", "debris", "rubbish"}}
-        observed = {label.get("Name", "").casefold() for label in response.get("Labels", [])}
+        observed = set()
+        labels = response.get("Labels")
+        if not isinstance(labels, list):
+            raise ValueError("Rekognition returned no label array")
+        for label in labels:
+            if not isinstance(label, dict) or not isinstance(label.get("Name"), str):
+                continue
+            observed.add(label["Name"].casefold())
+            for parent in label.get("Parents", []):
+                if isinstance(parent, dict) and isinstance(parent.get("Name"), str):
+                    observed.add(parent["Name"].casefold())
         categories = [category for category, keys in mappings.items() if observed & keys]
+        raw_labels = [{"name": label["Name"], "confidence": label.get("Confidence"),
+                       "parents": [parent["Name"] for parent in label.get("Parents", [])
+                                   if isinstance(parent, dict) and isinstance(parent.get("Name"), str)]}
+                      for label in labels if isinstance(label, dict) and isinstance(label.get("Name"), str)]
+        suggestions = [{"category": category, "inferred": True,
+                        "evidence": [label for label in raw_labels
+                                     if ({label["name"].casefold()} | {name.casefold() for name in label["parents"]}) & mappings[category]]}
+                       for category in categories]
         moderation_labels = [label.get("Name", "") for label in moderation_result.get("ModerationLabels", [])
                              if label.get("Confidence", 0) >= 60]
-        moderation_state = "review_required" if moderation_labels else "no_flag_returned"
-        return {"analysis_available": True, "categories": categories, "severity": "unassessed",
+        moderation_state = ("review_required" if moderation_labels else "no_flag_returned") if moderation_available else "check_unavailable"
+        return {"analysis_available": True, "source": "aws_rekognition", "categories": categories, "severity": "unassessed",
+                "raw_labels": raw_labels, "material_suggestions": suggestions,
                 "moderation_state": moderation_state, "moderation_labels": moderation_labels,
-                "note": "Amazon Rekognition labels are suggestions. Severity is not inferred and needs resident review."}
+                "note": "Amazon Rekognition labels are suggestions. Severity is not inferred and needs resident review." + (" Moderation check unavailable." if not moderation_available else "")}
     except Exception as exc:
         return {"analysis_available": False, "categories": [], "severity": "unassessed",
                 "moderation_state": "check_unavailable", "moderation_labels": [],
-                "note": f"Image analysis unavailable ({type(exc).__name__}). Add categories manually."}
+                "source": "unavailable", "note": _analysis_failure("Amazon Rekognition", exc)}
 
 
 def complaint_draft(report):
@@ -233,4 +343,4 @@ def complaint_draft(report):
             f"Hello,\n\nI am reporting unmanaged waste at {location}. "
             f"The observed categories are: {categories}. The resident-recorded severity is "
             f"{severity_label}; please verify on site. Please review the location and advise on cleanup.\n\n"
-            "This draft was prepared with WasteLens and has not been sent.\n")
+            "Please review this report and contact me if more information is needed.\n")

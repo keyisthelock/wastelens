@@ -6,3 +6,4 @@ httpx==0.28.1
 strands-agents==1.59.0
 Pillow==12.3.0
 mangum==0.22.0
+PyJWT[crypto]==2.15.1

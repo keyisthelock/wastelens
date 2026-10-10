@@ -3,13 +3,50 @@ Transform: AWS::Serverless-2016-10-31
 Description: WasteLens single-locality civic waste pilot (API, private photo storage, reports)
 
 Parameters:
+  GoogleClientId:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$'
+    Description: Optional public Google Web OAuth client ID. Empty keeps Google sign-in disabled.
+  BedrockEnabled:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+  RekognitionGuideFallback:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  AiDailyLimit:
+    Type: Number
+    Default: 25
+    MinValue: 1
+    MaxValue: 500
+    Description: Shared daily app AI operation allowance (UTC); not a dollar billing cap.
   AllowedOrigin:
     Type: String
+    AllowedPattern: '^https://[^/\s]+$'
     Description: Required exact HTTPS origin of the deployed frontend, with no trailing slash.
   BedrockModelId:
     Type: String
     Default: anthropic.claude-sonnet-4-5-20250929-v1:0
     Description: Multimodal Claude model enabled for this AWS account and region.
+  BedrockOutputMode:
+    Type: String
+    Default: json_schema
+    AllowedValues: [json_schema, prompt_json]
+    Description: Explicitly use prompt_json only for models without structured outputs.
+  BedrockInvokeResourceArns:
+    Type: CommaDelimitedList
+    Default: ''
+    Description: Optional exact model/profile ARNs including destination foundation models. Required for inference profiles; no wildcard service access.
+  ComplaintEmailFrom:
+    Type: String
+    Default: ''
+    Description: Optional verified Amazon SES sender identity email. Leave empty to disable email submission.
+
+Conditions:
+  ComplaintEmailConfigured: !Not [!Equals [!Ref ComplaintEmailFrom, '']]
+  ExplicitBedrockResources: !Not [!Equals [!Join ['', !Ref BedrockInvokeResourceArns], '']]
 
 Resources:
   WasteLensHttpApi:
@@ -17,6 +54,7 @@ Resources:
     Properties:
       StageName: prod
       CorsConfiguration:
+        AllowCredentials: true
         AllowOrigins:
           - !Ref AllowedOrigin
         AllowMethods:
@@ -69,7 +107,7 @@ Resources:
         SecurityHeadersConfig:
           ContentSecurityPolicy:
             ContentSecurityPolicy: >-
-              default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' blob: data: https:; connect-src 'self' https:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; upgrade-insecure-requests
+              default-src 'self'; script-src 'self' https://accounts.google.com/gsi/client; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://accounts.google.com/gsi/style; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' blob: data: https:; connect-src 'self' https:; frame-src https://accounts.google.com/gsi/; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; upgrade-insecure-requests
             Override: true
           ContentTypeOptions:
             Override: true
@@ -84,6 +122,14 @@ Resources:
             IncludeSubdomains: true
             Preload: false
             Override: true
+        CustomHeadersConfig:
+          Items:
+            - Header: Permissions-Policy
+              Value: 'camera=(self), microphone=(), geolocation=(self)'
+              Override: true
+            - Header: Cross-Origin-Opener-Policy
+              Value: same-origin-allow-popups
+              Override: true
 
   WasteLensDistribution:
     Type: AWS::CloudFront::Distribution
@@ -266,6 +312,9 @@ Resources:
 
   WasteLensApiFunction:
     Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+      BuildArchitecture: arm64
     DependsOn: WasteLensApiLogGroup
     Properties:
       FunctionName: !Sub '${AWS::StackName}-WasteLensApi'
@@ -278,12 +327,19 @@ Resources:
       Timeout: 45
       Environment:
         Variables:
+          WASTELENS_GOOGLE_CLIENT_ID: !Ref GoogleClientId
           WASTELENS_DYNAMODB_TABLE: !Ref WasteLensReportsTable
           WASTELENS_UPLOAD_BUCKET: !Ref WasteLensPhotoBucket
           WASTELENS_ADMIN_TOKEN_SECRET_ARN: !Ref WasteLensOperatorToken
           WASTELENS_BEDROCK_MODEL_ID: !Ref BedrockModelId
+          WASTELENS_BEDROCK_OUTPUT_MODE: !Ref BedrockOutputMode
+          WASTELENS_AI_DAILY_LIMIT: !Ref AiDailyLimit
+          WASTELENS_BEDROCK_ENABLED: !Ref BedrockEnabled
+          WASTELENS_REKOGNITION_GUIDE_FALLBACK: !Ref RekognitionGuideFallback
+          WASTELENS_COMPLAINT_EMAIL_FROM: !Ref ComplaintEmailFrom
           WASTELENS_ALLOWED_ORIGINS: !Ref AllowedOrigin
           WASTELENS_CLOUD_SECURITY_PROFILE: sam
+          WASTELENS_API_BASE_PATH: /prod
       Policies:
         - Statement:
             - Sid: ManagePilotReportsAndIndexes
@@ -315,13 +371,25 @@ Resources:
               Effect: Allow
               Action:
                 - bedrock:InvokeModel
-              Resource: !Sub 'arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}'
+              Resource: !If
+                - ExplicitBedrockResources
+                - !Ref BedrockInvokeResourceArns
+                - !Sub 'arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}'
             - Sid: InspectUploadedImage
               Effect: Allow
               Action:
                 - rekognition:DetectLabels
                 - rekognition:DetectModerationLabels
               Resource: '*'
+            - !If
+              - ComplaintEmailConfigured
+              - Sid: SendApprovedComplaintEmail
+                Effect: Allow
+                Action:
+                  - ses:SendEmail
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${ComplaintEmailFrom}'
+              - !Ref AWS::NoValue
       Events:
         ApiProxy:
           Type: HttpApi

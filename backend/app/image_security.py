@@ -12,7 +12,7 @@ IMAGE_TYPES = {
     "image/png": "png",
     "image/webp": "webp",
 }
-MAX_SAFE_ANALYSIS_BYTES = 4_800_000
+MAX_SAFE_ANALYSIS_BYTES = 3_700_000
 MAX_DIMENSION = 1600
 
 

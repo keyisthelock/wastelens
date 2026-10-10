@@ -2,6 +2,7 @@
 
 import os
 import re
+import hashlib
 from decimal import Decimal
 from functools import lru_cache
 
@@ -24,6 +25,18 @@ def table():
     return _table(os.environ["WASTELENS_DYNAMODB_TABLE"], region)
 
 
+def _s3_client(region):
+    """Sign against the actual regional host, avoiding fresh-bucket redirects."""
+    import boto3
+    from botocore.config import Config
+    if not region:
+        raise RuntimeError("AWS region is not configured")
+    suffix = "amazonaws.com.cn" if region.startswith("cn-") else "amazonaws.com"
+    return boto3.client("s3", region_name=region,
+                        endpoint_url=f"https://s3.{region}.{suffix}",
+                        config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}))
+
+
 def _photo_key(report_id):
     return f"reports/{report_id}.jpg"
 
@@ -32,11 +45,36 @@ def _pending_photo_key(report_id):
     return f"pending/{report_id}.jpg"
 
 
+def pending_photo_key(report_id):
+    """Canonical quarantine key shared by signing, confirmation, and cleanup."""
+    return _pending_photo_key(report_id)
+
+
+def complete_photo_upload(report_id, final_reference):
+    """Publish only an existing pending record after its normalized object is stored."""
+    from botocore.exceptions import ClientError
+
+    try:
+        table().update_item(
+            Key={"pk": f"REPORT#{report_id}", "sk": "REPORT"},
+            UpdateExpression="SET #image = :image, #state = :ready",
+            ConditionExpression="attribute_exists(pk) AND #state = :pending",
+            ExpressionAttributeNames={"#image": "image_path", "#state": "upload_state"},
+            ExpressionAttributeValues={":image": final_reference, ":ready": "ready",
+                                       ":pending": "pending"},
+        )
+        return True
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
 def store_photo(report_id, contents):
     if configured():
         import boto3
         region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
-        boto3.client("s3", region_name=region).put_object(
+        _s3_client(region).put_object(
             Bucket=os.environ["WASTELENS_UPLOAD_BUCKET"], Key=_photo_key(report_id),
             Body=contents, ContentType="image/jpeg", ServerSideEncryption="AES256",
             Metadata={"report-id": report_id},
@@ -45,12 +83,55 @@ def store_photo(report_id, contents):
     return f"/uploads/{report_id}.jpg"
 
 
+def store_confirmed_photo(report_id, contents):
+    """The first validated final snapshot wins, including overlapping retries."""
+    import boto3
+    from botocore.exceptions import ClientError
+    from app.image_security import MAX_SAFE_ANALYSIS_BYTES, normalize_uploaded_image
+
+    if not configured():
+        raise RuntimeError("Confirmed cloud photos require S3 storage")
+    region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+    client = _s3_client(region)
+    final_reference = _photo_key(report_id)
+    try:
+        client.put_object(
+            Bucket=os.environ["WASTELENS_UPLOAD_BUCKET"], Key=final_reference,
+            Body=contents, ContentType="image/jpeg", ServerSideEncryption="AES256",
+            Metadata={"report-id": report_id,
+                      "content-sha256": hashlib.sha256(contents).hexdigest()},
+            IfNoneMatch="*",
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") not in {"PreconditionFailed", "412"}:
+            raise
+        # Another confirmation (or a prior write whose response was lost) already
+        # stored this immutable snapshot. Validate it before committing readiness.
+        existing = client.get_object(Bucket=os.environ["WASTELENS_UPLOAD_BUCKET"],
+                                     Key=final_reference)
+        metadata = existing.get("Metadata", {})
+        stream = existing["Body"]
+        try:
+            if existing.get("ContentType") != "image/jpeg" or metadata.get("report-id") != report_id:
+                raise ValueError("Existing final photo could not be verified")
+            body = stream.read(MAX_SAFE_ANALYSIS_BYTES + 1)
+        finally:
+            stream.close()
+        if not body or len(body) > MAX_SAFE_ANALYSIS_BYTES:
+            raise ValueError("Existing final photo has an invalid size")
+        expected_digest = metadata.get("content-sha256")
+        if expected_digest and hashlib.sha256(body).hexdigest() != expected_digest:
+            raise ValueError("Existing final photo failed its integrity check")
+        normalize_uploaded_image(body, "image/jpeg")
+    return final_reference
+
+
 def create_photo_upload_url(report_id):
     if not configured():
         raise RuntimeError("Presigned uploads require configured S3 and DynamoDB")
     import boto3
     region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
-    return boto3.client("s3", region_name=region).generate_presigned_url(
+    return _s3_client(region).generate_presigned_url(
         "put_object", Params={"Bucket": os.environ["WASTELENS_UPLOAD_BUCKET"],
                               "Key": _pending_photo_key(report_id), "ContentType": "image/jpeg"},
         ExpiresIn=300, HttpMethod="PUT")
@@ -61,7 +142,7 @@ def uploaded_photo(image_path):
         raise RuntimeError("S3 photo storage is not configured")
     import boto3
     region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
-    client = boto3.client("s3", region_name=region)
+    client = _s3_client(region)
     try:
         metadata = client.head_object(Bucket=os.environ["WASTELENS_UPLOAD_BUCKET"], Key=image_path)
     except Exception as exc:
@@ -83,7 +164,7 @@ def photo_url(report_id, image_path):
         return image_path
     import boto3
     region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
-    return boto3.client("s3", region_name=region).generate_presigned_url(
+    return _s3_client(region).generate_presigned_url(
         "get_object", Params={"Bucket": os.environ["WASTELENS_UPLOAD_BUCKET"],
                               "Key": image_path}, ExpiresIn=300)
 
@@ -92,7 +173,7 @@ def delete_photo(image_path):
     if configured():
         import boto3
         region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
-        boto3.client("s3", region_name=region).delete_object(
+        _s3_client(region).delete_object(
             Bucket=os.environ["WASTELENS_UPLOAD_BUCKET"], Key=image_path)
 
 
@@ -100,7 +181,7 @@ def read_photo(image_path):
     if configured():
         import boto3
         region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
-        return boto3.client("s3", region_name=region).get_object(
+        return _s3_client(region).get_object(
             Bucket=os.environ["WASTELENS_UPLOAD_BUCKET"], Key=image_path)["Body"].read()
     from pathlib import Path
     from app.storage import ROOT
@@ -170,6 +251,57 @@ def atomic_status_update(report_id, new_status, actor_fingerprint, created_at):
     except client.exceptions.TransactionCanceledException:
         return False
     return previous
+
+
+def atomic_claim_complaint_submission(report_id, attempt_id, started_at, recipient, draft):
+    """Reserve one confirmed outbound email, atomically, in DynamoDB."""
+    import boto3
+
+    client = boto3.client("dynamodb", region_name=os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION"))
+    try:
+        client.update_item(
+            TableName=os.environ["WASTELENS_DYNAMODB_TABLE"],
+            Key={"pk": {"S": f"REPORT#{report_id}"}, "sk": {"S": "REPORT"}},
+            UpdateExpression=("SET complaint=:draft, submission_state=:sending, "
+                              "submission_id=:attempt, submission_started_at=:started, "
+                              "submission_sent_at=:empty, submission_message_id=:empty, "
+                              "submission_recipient=:recipient"),
+            ConditionExpression=("attribute_exists(pk) AND "
+                                 "(attribute_not_exists(submission_state) OR "
+                                 "submission_state = :not_sent OR "
+                                 "submission_state = :delivery_failed)"),
+            ExpressionAttributeValues={
+                ":draft": {"S": draft}, ":sending": {"S": "sending"},
+                ":attempt": {"S": attempt_id}, ":started": {"S": started_at},
+                ":recipient": {"S": recipient}, ":not_sent": {"S": "not_sent"},
+                ":delivery_failed": {"S": "delivery_failed"}, ":empty": {"S": ""},
+            },
+        )
+        return True
+    except client.exceptions.ConditionalCheckFailedException:
+        return False
+
+
+def atomic_finish_complaint_submission(report_id, attempt_id, state, sent_at="", message_id=""):
+    import boto3
+
+    client = boto3.client("dynamodb", region_name=os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION"))
+    try:
+        client.update_item(
+            TableName=os.environ["WASTELENS_DYNAMODB_TABLE"],
+            Key={"pk": {"S": f"REPORT#{report_id}"}, "sk": {"S": "REPORT"}},
+            UpdateExpression=("SET submission_state=:state, submission_sent_at=:sent, "
+                              "submission_message_id=:message_id"),
+            ConditionExpression="submission_id = :attempt AND submission_state = :sending",
+            ExpressionAttributeValues={
+                ":state": {"S": state}, ":sent": {"S": sent_at},
+                ":message_id": {"S": message_id}, ":attempt": {"S": attempt_id},
+                ":sending": {"S": "sending"},
+            },
+        )
+        return True
+    except client.exceptions.ConditionalCheckFailedException:
+        return False
 
 
 class Row(dict):
@@ -271,6 +403,12 @@ class Connection:
         result.setdefault("mass_max_kg", None)
         result.setdefault("owner_token_hash", "")
         result.setdefault("upload_state", "ready")
+        result.setdefault("submission_state", "not_sent")
+        result.setdefault("submission_id", "")
+        result.setdefault("submission_started_at", "")
+        result.setdefault("submission_sent_at", "")
+        result.setdefault("submission_message_id", "")
+        result.setdefault("submission_recipient", "")
         return result
 
     def _select(self, statement, params):
@@ -282,28 +420,31 @@ class Connection:
             row = self._get(params[0])
             rows = [row] if row else []
         elif "WHERE id<>?" in statement or "WHERE id <> ?" in statement:
-            excluded, limit = params[0], int(params[1])
+            excluded = params[0]
             rows = [row for row in self._scan_reports() if row["id"] != excluded]
-            rows.sort(key=lambda row: row["created_at"], reverse=True)
-            rows = rows[:limit]
         elif "WHERE status=?" in statement or "WHERE status = ?" in statement:
-            status, limit = params[0], int(params[1])
+            status = params[0]
             rows = [row for row in self._scan_reports() if row["status"] == status]
-            rows.sort(key=lambda row: row["created_at"], reverse=True)
-            rows = rows[:limit]
-        elif "ORDER BY created_at DESC LIMIT ?" in statement:
-            rows = self._scan_reports()
-            rows.sort(key=lambda row: row["created_at"], reverse=True)
-            rows = rows[:int(params[-1])]
         elif "FROM reports" in statement:
             rows = self._scan_reports()
         else:
             raise NotImplementedError(f"AWS storage cannot read query: {statement[:80]}")
+        # Keep every predicate on complete records, as SQLite does. In particular,
+        # pending uploads must not consume the board limit or bypass its ready filter
+        # when a projection omits upload_state.
+        if re.search(r"\bupload_state\s*=\s*'ready'", statement, re.IGNORECASE):
+            rows = [row for row in rows if row.get("upload_state", "ready") == "ready"]
+        if "ORDER BY created_at DESC" in statement:
+            rows.sort(key=lambda row: row["created_at"], reverse=True)
+        limit_match = re.search(r"\bLIMIT\s+(\?|\d+)\s*$", statement, re.IGNORECASE)
+        if limit_match:
+            limit_value = limit_match.group(1)
+            limit = int(params[-1]) if limit_value == "?" else int(limit_value)
+            if limit >= 0:
+                rows = rows[:limit]
         if projection != "*":
             fields = [value.strip() for value in projection.split(",")]
             rows = [{field: row.get(field) for field in fields} for row in rows]
-        if "upload_state='ready'" in statement:
-            rows = [row for row in rows if row.get("upload_state", "ready") == "ready"]
         return Result(rows)
 
     def _insert_report(self, statement, params):

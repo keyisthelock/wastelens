@@ -1,0 +1,25 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "TemporaryBrowserLoginInMumbai",
+      "Effect": "Allow",
+      "Action": ["signin:AuthorizeOAuth2Access", "signin:CreateOAuth2Token"],
+      "Resource": "arn:aws:signin:ap-south-1:${aws:PrincipalAccount}:oauth2/public-client/localhost"
+    },
+    {
+      "Sid": "InspectBedrockMetadataInMumbai",
+      "Effect": "Allow",
+      "Action": ["bedrock:GetFoundationModel", "bedrock:GetInferenceProfile", "bedrock:ListInferenceProfiles"],
+      "Resource": "*",
+      "Condition": {"StringEquals": {"aws:RequestedRegion": "ap-south-1"}}
+    },
+    {
+      "Sid": "TestImageLabelsInMumbai",
+      "Effect": "Allow",
+      "Action": ["rekognition:DetectLabels", "rekognition:DetectModerationLabels"],
+      "Resource": "*",
+      "Condition": {"StringEquals": {"aws:RequestedRegion": "ap-south-1"}}
+    }
+  ]
+}

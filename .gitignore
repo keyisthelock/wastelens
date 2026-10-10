@@ -25,4 +25,7 @@ frontend/dist/
 .pytest_cache/
 coverage/
 WasteLens-project.zip
+# Exported archives and SAM artifacts can contain private runtime data.
+*.zip
+.aws-sam/
 .DS_Store
