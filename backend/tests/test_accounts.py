@@ -33,7 +33,12 @@ class AccountTests(unittest.TestCase):
         self.assertIn('HttpOnly', cookie); self.assertIn('Secure', cookie); self.assertIn('SameSite=strict', cookie)
         self.assertEqual(response.headers['cache-control'], 'no-store')
         self.assertFalse(response.json()['user']['email_verified'])
-        self.assertNotIn('token', str(response.json())); self.assertNotIn('password', str(response.json()))
+        payload = response.json()
+        self.assertEqual(set(payload), {'user'})
+        self.assertEqual(set(payload['user']), {'id', 'name', 'email', 'email_verified', 'auth_provider'})
+        self.assertEqual(payload['user']['auth_provider'], 'password')
+        self.assertNotIn(self.body['password'], str(payload))
+        self.assertNotIn(self.client.cookies.get(accounts.COOKIE), str(payload))
         user = self.client.get('/api/auth/me').json()['user']
         self.assertEqual(user['email'], self.body['email'])
         with storage.connect() as db:
