@@ -171,6 +171,7 @@ template.yaml      AWS SAM infrastructure
 
 - [AWS deployment](docs/deployment-aws.md)
 - [Live AWS verification](docs/aws-integration-verification.md)
+- [Final app check — 11 October](docs/final-check-2026-10-11.md)
 - [API contract](docs/api-contract.md)
 - [Architecture](docs/architecture.md)
 - [Demo walkthrough](docs/demo-script.md)

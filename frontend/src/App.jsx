@@ -8,6 +8,7 @@ import CommunitiesPanel from './components/CommunitiesPanel.jsx'
 import AccountPage from './components/AccountPage.jsx'
 import CameraCapture from './components/CameraCapture.jsx'
 import SocialSidebar from './components/SocialSidebar.jsx'
+import { scrollToPageHash } from './page-scroll.js'
 import { accountRequest } from './account-api.js'
 import AreaPicker from './components/AreaPicker.jsx'
 import { getDeviceLocation, lookupNearbyBins } from './location.js'
@@ -71,13 +72,15 @@ function App() {
   const [page, setPage] = useState(pageFromHash)
   const [account, setAccount] = useState(null)
   const [accountError, setAccountError] = useState('')
+  const socialContentRef = useRef(null)
   useEffect(() => {
-    if (page === 'feed' && ['#everyday', '#how'].includes(window.location.hash)) {
-      document.getElementById(window.location.hash.slice(1))?.scrollIntoView({ block: 'start' })
-    }
+    scrollToPageHash(window.location.hash, socialContentRef.current)
   }, [page])
   useEffect(() => {
-    const change = () => { setPage(pageFromHash()); if (['#login', '#groups'].includes(window.location.hash)) window.scrollTo({ top: 0 }) }
+    const change = () => {
+      setPage(pageFromHash())
+      scrollToPageHash(window.location.hash, socialContentRef.current)
+    }
     window.addEventListener('hashchange', change)
     accountRequest(fetch, API, 'me').then(setAccount).catch(() => setAccountError('Account connection unavailable. Guest reporting is still available.'))
     return () => window.removeEventListener('hashchange', change)
@@ -250,7 +253,7 @@ function App() {
     }, { threshold: 0.12, rootMargin: '0px 0px -28px 0px' })
     document.querySelectorAll('.reveal:not(.is-visible)').forEach((node) => observer.observe(node))
     return () => observer.disconnect()
-  }, [reports.length, showForm, selected, assistantOpen, categoryFilter, statusFilter, search])
+  }, [page, reports.length, showForm, selected, assistantOpen, categoryFilter, statusFilter, search])
   useEffect(() => () => window.clearTimeout(toastTimer.current), [])
 
   const flash = (message) => {
@@ -430,13 +433,19 @@ function App() {
   const manualRecoveryRoute = recoveryRoutes.routes?.find((route) => route.category === manualCategory)
   const unlistedCreatedReports = savedReportsMissingFromBoard(createdReports, reports)
 
-  return <div className="page-shell" id="top">
+  return <div className="page-shell" id="top" onClick={(event) => {
+    const hash = event.target.closest('a')?.getAttribute('href')
+    if (hash === window.location.hash && ['#top', '#community', '#everyday', '#how', '#groups', '#login'].includes(hash)) {
+      event.preventDefault()
+      scrollToPageHash(hash, socialContentRef.current)
+    }
+  }}>
     {introOpen && <div className="splash-screen" aria-label="WasteLens welcome"><div className="splash-art"><span className="splash-leaf splash-leaf-a"><Leaf size={22}/></span><span className="splash-leaf splash-leaf-b"><Leaf size={16}/></span><span className="splash-logo"><LogoMark/></span><span className="splash-ring"/></div><div className="splash-wordmark">waste<span>lens</span></div><div className="splash-rule"/><p>Small acts. Cleaner streets.</p><button autoFocus className="splash-skip" onClick={() => setIntroOpen(false)}>Skip intro <ArrowRight size={13}/></button></div>}
     <header className="topbar"><a className="brand" href="#top"><span className="brand-mark"><LogoMark/></span><span>waste<span className="brand-light">lens</span></span></a><nav><a href="#community">Feed</a><a href="#groups">Communities</a><a href="#everyday">Guide</a><a href="#how">How it works</a><button className="nav-ai" onClick={() => setAssistantOpen(true)}><Sparkles size={14}/> Field guide</button></nav>{officialPortalUrl ? <a className="button button-dark top-cta" href={officialPortalUrl} target="_blank" rel="noreferrer"><ArrowUpRight size={15}/> Official LNN portal</a> : <span className="top-portal-unavailable">Municipal portal not configured</span>}<a className="top-account" href="#login"><span className="top-avatar">{account ? account.name.slice(0,1).toUpperCase() : <Leaf size={15}/>}</span>{account ? account.name : 'Log in'}</a></header>
     {error && <div className="notice" role="alert"><CircleHelp size={16}/>{error}<button onClick={() => setError('')} aria-label="Dismiss"><X size={15}/></button></div>}
     {toast && <div className="toast" role="status"><span><Check size={15}/></span>{toast}<button onClick={() => setToast('')} aria-label="Dismiss"><X size={14}/></button></div>}
     {unlistedCreatedReports.map((report) => <div className="saved-report-notice" key={report.id} role="status"><Check size={15}/><span><b>Report saved · {report.id.slice(0, 8).toUpperCase()}</b> Your report is available while the board catches up.</span><button className="button button-outline" onClick={() => setSelected(report)}>Open saved report <ArrowUpRight size={14}/></button></div>)}
-    <div className="social-app-layout"><SocialSidebar page={page} user={account} onAsk={() => setAssistantOpen(true)}/><main className="social-content">
+    <div className="social-app-layout" data-modal-open={showForm || Boolean(selected) ? 'true' : undefined}><SocialSidebar page={page} user={account} onAsk={() => setAssistantOpen(true)}/><main className="social-content" ref={socialContentRef} tabIndex={0} aria-label="WasteLens content">
     {accountError && <p className="account-connect-note" role="status">{accountError}</p>}
     {page === 'login' ? <AccountPage api={API} user={account} onAccount={(user) => { setAccount(user); setAccountError('') }}/> : page === 'groups' ? <section className="community-hub"><div className="hub-cover"><span className="eyebrow">CLEANER STREETS. STRONGER CONNECTIONS.</span><h1>Find your people.<br/><em>Change your corner.</em></h1><p>A neighborhood group, a student club, or a few friends who care. Make a home for your shared goal.</p><span className="hub-flower" aria-hidden="true">✳</span></div><CommunitiesPanel registration api={API} getClientToken={clientToken} user={account}/></section> : <>
       <section className="hero">
@@ -474,8 +483,8 @@ function App() {
       <section className="bottom-band reveal" id="how"><div className="bottom-spark">✳</div><div><span className="eyebrow">FROM SIGHTING TO SOLUTION</span><h2>Don’t scroll past it.<br/><em>Show up for it.</em></h2></div><div className="steps"><div><span>01</span><b>Spot a waste site</b><small>Snap a photo and pin the location.</small></div><div><span>02</span><b>Get a clear next step</b><small>Review an editable complaint draft.</small></div><div><span>03</span><b>Bring others along</b><small>Discuss the report and plan a next step together.</small></div></div></section>
       <div className="privacy-footer"><ShieldCheck size={13}/> Shared photos bring neighbors together. Exact locations and complaint drafts stay private.</div>
     </>}
-    </main></div>
     <footer><a className="brand" href="#top"><span className="brand-mark"><LogoMark/></span><span>waste<span className="brand-light">lens</span></span></a><span className="footer-quote">A better tomorrow starts on your street.</span><span>COMMUNITY POWERED · ESTIMATE LABELLED</span></footer>
+    </main></div>
 
     {showForm && <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setShowForm(false)}><form className="modal report-modal" role="dialog" aria-modal="true" aria-labelledby="report-form-title" onSubmit={submit}><div className="modal-head"><div><div className="eyebrow muted">ADD TO THE COMMUNITY BOARD</div><h2 id="report-form-title">Report a waste site</h2></div><button type="button" className="icon-button" onClick={() => setShowForm(false)} aria-label="Close report form"><X size={19}/></button></div><label className={`upload-box ${photo ? 'has-photo' : ''}`} onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('dragging') }} onDragLeave={(e) => e.currentTarget.classList.remove('dragging')} onDrop={(e) => { e.preventDefault(); e.currentTarget.classList.remove('dragging'); choosePhoto(e.dataTransfer.files[0]) }}>{photo ? <><img src={photoUrl} alt="Selected report preview"/><span className="upload-caption"><Check size={16}/>{photo.name}<small>Click or drop to choose another photo</small></span></> : <><UploadCloud size={23}/><b>Drop a photo or browse files</b><small>JPG, PNG or WebP · max 8 MB</small></>}<input ref={fileRef} type="file" disabled={loading} accept="image/jpeg,image/png,image/webp" required={!photo} onChange={(e) => choosePhoto(e.target.files[0])}/></label><CameraCapture onCapture={choosePhoto} disabled={loading}/><label className="field-label">LOCATION · LUCKNOW PILOT <button type="button" className="locate-link" disabled={loading || locationBusy || Boolean(pendingUpload)} onClick={useLocation}><Crosshair size={13}/> {locationBusy ? 'Locating…' : 'Use my location'}</button></label><input required disabled={loading || Boolean(pendingUpload)} value={address} onChange={(e) => setAddress(e.target.value)} placeholder="Street, landmark or neighborhood in Lucknow" className="text-input"/><div className="coordinate-row"><input required disabled={loading || Boolean(pendingUpload)} type="number" step="any" value={latitude} onChange={(e) => { setLatitude(e.target.value); setReportFix(null) }} aria-label="Report latitude" placeholder="Latitude" className="text-input"/><input required disabled={loading || Boolean(pendingUpload)} type="number" step="any" value={longitude} onChange={(e) => { setLongitude(e.target.value); setReportFix(null) }} aria-label="Report longitude" placeholder="Longitude" className="text-input"/></div>{reportFix && <p className="draft-message" role="status">Device returned {reportFix.latitude.toFixed(6)}, {reportFix.longitude.toFixed(6)} · accuracy {reportFix.accuracy == null ? 'not provided' : `±${Math.round(reportFix.accuracy)} m`}. Check and correct the waste site location before filing.</p>}{locationError && <p className="tool-error" role="alert">{locationError}</p>}{error && <p className="tool-error" role="alert">{error}</p>}<label className="jurisdiction-check photo-sharing-choice"><input type="checkbox" checked={photoPublic} disabled={loading || Boolean(pendingUpload)} onChange={(event) => setPhotoPublic(event.target.checked)}/><span><b>Share this photo on the community board</b><br/>Anyone can view or download it. Check for faces, number plates and private details before sharing. Exact coordinates and complaint drafts stay private.</span></label><label className="jurisdiction-check"><input type="checkbox" required/><span>I confirm this site is within Lucknow Nagar Nigam’s jurisdiction.</span></label>{pendingUpload && <p className="draft-message" role="status">Submission reference {pendingUpload.reportId.slice(0, 8).toUpperCase()}. Confirmation is pending. Retry this submission safely; do not start another.</p>}<div className="form-foot"><span><ShieldCheck size={14}/> Nothing is sent to an authority</span><button className="button button-green" disabled={loading || !photo}>{loading ? <><span className="button-loader"/> {pendingUpload ? 'Confirming submission…' : 'Creating report…'}</> : <>{pendingUpload ? 'Retry this submission safely' : 'Create community report'} <ArrowRight size={15}/></>}</button></div></form></div>}
     {selected && <ReportDetail report={selected} focusComments={discussionReportId === selected.id} onClose={() => { setSelected(null); if (window.location.hash.startsWith('#report/')) window.location.hash = 'community' }} onSave={saveDraft} onAssess={saveAssessment} onSupport={support} onAsk={() => askAboutReport(selected)} onPlan={() => askAboutReport(selected, 'solutions')} onSubmitted={syncSubmittedReport} enrichment={enrichmentByReport[selected.id] || {}} onRetryEnrichment={retryEnrichment}/>}
